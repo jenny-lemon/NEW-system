@@ -671,7 +671,6 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
 
-convert_birthday_to_ad = st.checkbox("生日送出改西元格式（如後台不接受民國再勾）", value=False)
 import_clicked = st.button("🚀 開始匯入", type="primary", use_container_width=False)
 
 if import_clicked:
