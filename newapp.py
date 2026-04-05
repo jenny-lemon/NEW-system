@@ -12,17 +12,21 @@ try:
 except Exception:
     account_module = None
 
+try:
+    from area import AREA_CONFIG
+except Exception:
+    AREA_CONFIG = {
+        "台北": {
+            "sheet_id": "1hsmwhA36I0BPXQ8d6OYGGn8R_SETQe4vTR_FB5Sp8Uc",
+            "sheet_name": "新人基本資料",
+            "extra_payload": {},
+        }
+    }
+
 BASE_URL = "https://backend.lemonclean.com.tw"
 LOGIN_URL = f"{BASE_URL}/login"
 USER_ADD_URL = f"{BASE_URL}/user/add"
 USER_LIST_URL = f"{BASE_URL}/user"
-
-GOOGLE_SHEET_ID = "1hsmwhA36I0BPXQ8d6OYGGn8R_SETQe4vTR_FB5Sp8Uc"
-GOOGLE_SHEET_NAME = "新人基本資料"
-GOOGLE_SHEET_CSV_URL = (
-    f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq"
-    f"?tqx=out:csv&sheet={GOOGLE_SHEET_NAME}"
-)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -128,6 +132,7 @@ def load_accounts() -> Dict[str, Dict[str, str]]:
     accounts: Dict[str, Dict[str, str]] = {}
     if account_module is None:
         return accounts
+
     if hasattr(account_module, "ACCOUNTS"):
         raw = getattr(account_module, "ACCOUNTS")
         if isinstance(raw, dict):
@@ -136,12 +141,23 @@ def load_accounts() -> Dict[str, Dict[str, str]]:
                     email = v.get("email")
                     password = v.get("password")
                     if email and password:
-                        accounts[str(k)] = {"email": str(email), "password": str(password)}
+                        accounts[str(k)] = {
+                            "email": str(email),
+                            "password": str(password),
+                        }
     return accounts
 
 
-def fetch_sheet() -> pd.DataFrame:
-    resp = requests.get(GOOGLE_SHEET_CSV_URL, timeout=30)
+def build_sheet_csv_url(sheet_id: str, sheet_name: str) -> str:
+    return (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq"
+        f"?tqx=out:csv&sheet={sheet_name}"
+    )
+
+
+def fetch_sheet(sheet_id: str, sheet_name: str) -> pd.DataFrame:
+    url = build_sheet_csv_url(sheet_id, sheet_name)
+    resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     return pd.read_csv(StringIO(resp.text))
 
@@ -172,21 +188,26 @@ def inspect_user_add_form(session: requests.Session) -> Dict:
     r.raise_for_status()
     if "login" in r.url.lower():
         raise RuntimeError("登入狀態失效，已被導回登入頁")
+
     soup = BeautifulSoup(r.text, "html.parser")
     form = soup.find("form")
     if not form:
         raise RuntimeError("找不到新增使用者表單")
+
     token_input = form.find("input", {"name": "_token"})
     if not token_input or not token_input.get("value"):
         raise RuntimeError("找不到表單 _token")
+
     action = form.get("action") or "/user/add"
     method = (form.get("method") or "POST").upper()
     submit_url = action if action.startswith("http") else BASE_URL + action
+
     names = set()
     for tag in form.find_all(["input", "select", "textarea"]):
         name = tag.get("name")
         if name:
             names.add(name)
+
     return {
         "submit_url": submit_url,
         "method": method,
@@ -227,23 +248,34 @@ def convert_roc_to_ad_if_needed(value: str) -> str:
     return f"{y:04d}-{mth:02d}-{day:02d}"
 
 
-def build_payload(row: Dict[str, str], token: str, convert_birthday_to_ad: bool) -> Dict[str, object]:
+def build_payload(
+    row: Dict[str, str],
+    token: str,
+    convert_birthday_to_ad: bool,
+    area_extra_payload: Dict[str, str],
+) -> Dict[str, object]:
     merged = {}
     merged.update(FIXED_VALUES)
     merged.update(row)
+
     payload: Dict[str, object] = {"_token": token}
+
     for zh_name, field_name in FORM_FIELD_MAP.items():
         value = merged.get(zh_name, "").strip()
+
         if zh_name == "生日":
             if convert_birthday_to_ad:
                 value = convert_roc_to_ad_if_needed(value)
             payload[field_name] = value
             continue
+
         if zh_name == "角色":
             mapped = map_single_value(zh_name, value)
             payload[field_name] = [mapped] if mapped else []
             continue
+
         payload[field_name] = map_single_value(zh_name, value)
+
     service_value = merged.get("服務項目", "").strip()
     items = []
     raw_items = [x.strip() for x in re.split(r"[、,，/]+", service_value) if x.strip()]
@@ -254,8 +286,13 @@ def build_payload(row: Dict[str, str], token: str, convert_birthday_to_ad: bool)
         if mapped:
             items.append(mapped)
     payload["coordinator_item[]"] = items
+
     if payload.get("password") and "password_confirmation" not in payload:
         payload["password_confirmation"] = payload["password"]
+
+    for key, value in area_extra_payload.items():
+        payload[key] = value
+
     return payload
 
 
@@ -266,18 +303,22 @@ def submit_user(session: requests.Session, submit_url: str, payload: Dict[str, o
 def extract_error_message(resp: requests.Response) -> str:
     soup = BeautifulSoup(resp.text, "html.parser")
     msgs = []
+
     for selector in [".alert-danger", ".invalid-feedback", ".help-block", ".text-danger", ".error"]:
         for tag in soup.select(selector):
             txt = tag.get_text(" ", strip=True)
             if txt and txt not in msgs:
                 msgs.append(txt)
+
     for li in soup.select("ul li"):
         txt = li.get_text(" ", strip=True)
         if txt and ("必填" in txt or "錯誤" in txt or "required" in txt.lower()):
             if txt not in msgs:
                 msgs.append(txt)
+
     if msgs:
         return " | ".join(msgs[:10])
+
     title = soup.title.get_text(strip=True) if soup.title else ""
     return f"回傳表單頁，可能驗證失敗。URL={resp.url} TITLE={title}"
 
@@ -285,25 +326,24 @@ def extract_error_message(resp: requests.Response) -> str:
 def is_success_response(resp: requests.Response) -> bool:
     if resp.status_code >= 400:
         return False
+
     normalized_url = resp.url.rstrip("/")
     if normalized_url == USER_LIST_URL:
         return True
+
     text = resp.text.lower()
     if "<form" in text and 'name="name"' in text and 'name="password"' in text and 'name="_token"' in text:
         return False
+
     return False
 
-
-# ─── Page config & global styles ─────────────────────────────────────────────
 
 st.set_page_config(page_title="新人匯入工具", page_icon="🍋", layout="wide")
 
 st.markdown("""
 <style>
-/* ── Google Font ── */
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
 
-/* ── CSS Variables ── */
 :root {
     --lemon:       #F5C518;
     --lemon-dark:  #D4A017;
@@ -320,17 +360,14 @@ st.markdown("""
     --shadow:      0 2px 16px rgba(0,0,0,0.07);
 }
 
-/* ── Base reset ── */
 html, body, [class*="css"] {
     font-family: 'Noto Sans TC', sans-serif;
     color: var(--charcoal);
 }
 
-/* ── Hide default Streamlit chrome ── */
 #MainMenu, footer, header { visibility: hidden; }
 .block-container { padding-top: 2rem !important; max-width: 1120px; }
 
-/* ── Hero header ── */
 .hero {
     background: linear-gradient(135deg, #FFFDF0 0%, #FFFBEA 100%);
     border: 1.5px solid var(--lemon-mid);
@@ -353,7 +390,6 @@ html, body, [class*="css"] {
 }
 .hero-sub { color: var(--ink); font-size: 0.88rem; margin-top: 0.3rem; opacity: 0.75; }
 
-/* ── Step pill ── */
 .step-pill {
     display: inline-flex;
     align-items: center;
@@ -381,26 +417,6 @@ html, body, [class*="css"] {
     font-weight: 700;
 }
 
-/* ── Card container ── */
-.card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1.5rem 1.8rem;
-    margin-bottom: 1.4rem;
-    box-shadow: var(--shadow);
-}
-.card-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 1.05rem;
-    font-weight: 700;
-    color: var(--charcoal);
-    margin: 0 0 1.1rem;
-    padding-bottom: 0.7rem;
-    border-bottom: 2px solid var(--lemon-mid);
-}
-
-/* ── Status badge ── */
 .badge-ok {
     display: inline-block;
     background: #D1FAE5; color: #065F46;
@@ -420,7 +436,6 @@ html, body, [class*="css"] {
     font-size: 0.8rem; font-weight: 600;
 }
 
-/* ── Info strip ── */
 .info-strip {
     background: var(--lemon-soft);
     border-left: 4px solid var(--lemon);
@@ -431,7 +446,6 @@ html, body, [class*="css"] {
     margin-bottom: 0.8rem;
 }
 
-/* ── Stat boxes ── */
 .stat-row { display: flex; gap: 1rem; margin-top: 1rem; }
 .stat-box {
     flex: 1;
@@ -447,7 +461,6 @@ html, body, [class*="css"] {
 .stat-err .stat-num { color: var(--danger); }
 .stat-tot .stat-num { color: var(--charcoal); }
 
-/* ── Streamlit widget polish ── */
 .stButton > button {
     background: var(--lemon) !important;
     color: var(--charcoal) !important;
@@ -472,127 +485,110 @@ html, body, [class*="css"] {
     background: #2C2C2E !important;
 }
 
-/* stSelectbox, stTextInput */
 .stSelectbox > div > div,
 .stTextInput > div > div > input,
 .stNumberInput > div > div > input {
     border-radius: 8px !important;
     border: 1.5px solid var(--border) !important;
-    transition: border-color 0.15s !important;
-}
-.stSelectbox > div > div:focus-within,
-.stTextInput > div > div > input:focus,
-.stNumberInput > div > div > input:focus {
-    border-color: var(--lemon) !important;
-    box-shadow: 0 0 0 3px rgba(245,197,24,0.18) !important;
 }
 
-/* stCheckbox */
-.stCheckbox > label > span:first-child {
-    border-color: var(--lemon-dark) !important;
-}
-
-/* Expander */
 .streamlit-expanderHeader {
     font-weight: 600 !important;
     font-size: 0.93rem !important;
-    border-radius: 8px !important;
 }
 
-/* Divider */
-hr { border-color: var(--border) !important; margin: 1.2rem 0 !important; }
-
-/* Dataframe */
 .stDataFrame { border-radius: 10px !important; overflow: hidden; }
-
-/* Progress bar */
-.stProgress > div > div > div > div {
-    background: var(--lemon) !important;
-}
+.stProgress > div > div > div > div { background: var(--lemon) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-
-# ── Hero ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
   <div class="hero-emoji">🍋</div>
   <div>
     <div class="hero-title">新人系統建檔工具</div>
-    <div class="hero-sub">登入後台 &nbsp;→&nbsp; 讀取 Google Sheet &nbsp;→&nbsp; 選擇起訖列 &nbsp;→&nbsp; 批次匯入</div>
+    <div class="hero-sub">登入後台 → 選擇地區 → 讀取 Google Sheet → 選擇起訖列 → 批次匯入</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-
-# ── Session state ─────────────────────────────────────────────────────────────
 accounts = load_accounts()
 for key in ["session", "logged_in_email", "sheet_df", "form_info"]:
     if key not in st.session_state:
         st.session_state[key] = None if key != "logged_in_email" else ""
 
+if "area_name" not in st.session_state:
+    st.session_state.area_name = list(AREA_CONFIG.keys())[0]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 ── 後台登入
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="step-pill"><span class="step-num">1</span>後台登入</div>', unsafe_allow_html=True)
 
-with st.container():
-    login_status_placeholder = st.empty()
+st.markdown('<div class="step-pill"><span class="step-num">1</span>選擇地區</div>', unsafe_allow_html=True)
 
-    with st.expander("展開登入設定", expanded=st.session_state.session is None):
-        if accounts:
-            account_name = st.selectbox("選擇帳號", list(accounts.keys()), label_visibility="collapsed"
-                                        if not accounts else "visible")
-            default_email    = accounts[account_name]["email"]
-            default_password = accounts[account_name]["password"]
-        else:
-            default_email = default_password = ""
+area_name = st.selectbox("選擇地區", list(AREA_CONFIG.keys()), key="area_name")
+area_conf = AREA_CONFIG[area_name]
 
-        c1, c2, c3 = st.columns([3, 3, 1.4])
-        with c1:
-            email = st.text_input("Email", value=default_email, placeholder="admin@example.com")
-        with c2:
-            password = st.text_input("Password", value=default_password, type="password", placeholder="••••••••")
-        with c3:
-            st.write("")
-            st.write("")
-            login_clicked = st.button("🔐 登入後台", use_container_width=True)
-
-        if login_clicked:
-            with st.spinner("登入中…"):
-                try:
-                    sess = login_backend(email, password)
-                    form_info = inspect_user_add_form(sess)
-                    st.session_state.session = sess
-                    st.session_state.logged_in_email = email
-                    st.session_state.form_info = form_info
-                    st.success(f"✅ 登入成功：**{email}**")
-                    st.caption(f"Submit URL: `{form_info['submit_url']}`")
-                except Exception as e:
-                    st.error(f"❌ {e}")
-
-    if st.session_state.session:
-        login_status_placeholder.markdown(
-            f'<span class="badge-ok">✓ 已登入　{st.session_state.logged_in_email}</span>',
-            unsafe_allow_html=True,
-        )
-    else:
-        login_status_placeholder.markdown(
-            '<span class="badge-warn">尚未登入</span>', unsafe_allow_html=True
-        )
+st.markdown(
+    f'<div class="info-strip">📍 目前地區：<strong>{area_name}</strong>　'
+    f'工作表：<strong>{area_conf.get("sheet_name", "")}</strong></div>',
+    unsafe_allow_html=True,
+)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 ── 讀取 Google Sheet
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="step-pill"><span class="step-num">2</span>讀取 Google Sheet</div>', unsafe_allow_html=True)
+st.markdown('<div class="step-pill"><span class="step-num">2</span>後台登入</div>', unsafe_allow_html=True)
+
+login_status_placeholder = st.empty()
+
+with st.expander("展開登入設定", expanded=st.session_state.session is None):
+    if accounts:
+        account_name = st.selectbox("選擇帳號", list(accounts.keys()))
+        default_email = accounts[account_name]["email"]
+        default_password = accounts[account_name]["password"]
+    else:
+        default_email = ""
+        default_password = ""
+
+    c1, c2, c3 = st.columns([3, 3, 1.4])
+    with c1:
+        email = st.text_input("Email", value=default_email, placeholder="admin@example.com")
+    with c2:
+        password = st.text_input("Password", value=default_password, type="password", placeholder="••••••••")
+    with c3:
+        st.write("")
+        st.write("")
+        login_clicked = st.button("🔐 登入後台", use_container_width=True)
+
+    if login_clicked:
+        with st.spinner("登入中…"):
+            try:
+                sess = login_backend(email, password)
+                form_info = inspect_user_add_form(sess)
+                st.session_state.session = sess
+                st.session_state.logged_in_email = email
+                st.session_state.form_info = form_info
+                st.success(f"✅ 登入成功：**{email}**")
+                st.caption(f"Submit URL: `{form_info['submit_url']}`")
+            except Exception as e:
+                st.error(f"❌ {e}")
+
+if st.session_state.session:
+    login_status_placeholder.markdown(
+        f'<span class="badge-ok">✓ 已登入　{st.session_state.logged_in_email}</span>',
+        unsafe_allow_html=True,
+    )
+else:
+    login_status_placeholder.markdown(
+        '<span class="badge-warn">尚未登入</span>', unsafe_allow_html=True
+    )
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+st.markdown('<div class="step-pill"><span class="step-num">3</span>讀取 Google Sheet</div>', unsafe_allow_html=True)
 
 st.markdown(
-    f'<div class="info-strip">📋 工作表：<strong>{GOOGLE_SHEET_NAME}</strong>'
-    f'　　ID：<code>{GOOGLE_SHEET_ID}</code></div>',
+    f'<div class="info-strip">📋 工作表：<strong>{area_conf.get("sheet_name", "")}</strong>'
+    f'　　ID：<code>{area_conf.get("sheet_id", "")}</code></div>',
     unsafe_allow_html=True,
 )
 
@@ -605,13 +601,17 @@ with col_status:
 if fetch_clicked:
     with st.spinner("讀取中…"):
         try:
-            df = fetch_sheet()
+            df = fetch_sheet(area_conf["sheet_id"], area_conf["sheet_name"])
             st.session_state.sheet_df = df
             sheet_status.markdown(
-                f'<span class="badge-ok">✓ 已讀取 {len(df)} 筆資料</span>', unsafe_allow_html=True
+                f'<span class="badge-ok">✓ 已讀取 {len(df)} 筆資料</span>',
+                unsafe_allow_html=True,
             )
         except Exception as e:
-            sheet_status.markdown(f'<span class="badge-err">✗ 讀取失敗：{e}</span>', unsafe_allow_html=True)
+            sheet_status.markdown(
+                f'<span class="badge-err">✗ 讀取失敗：{e}</span>',
+                unsafe_allow_html=True,
+            )
 
 df = st.session_state.sheet_df
 if df is not None:
@@ -621,20 +621,18 @@ if df is not None:
     else:
         st.markdown('<span class="badge-ok">✓ 欄位檢查通過</span>', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
+
     with st.expander("預覽前 10 筆", expanded=False):
         st.dataframe(df.head(10), use_container_width=True)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 ── 選擇起訖列
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="step-pill"><span class="step-num">3</span>選擇起訖列與預覽</div>', unsafe_allow_html=True)
+st.markdown('<div class="step-pill"><span class="step-num">4</span>選擇起訖列與預覽</div>', unsafe_allow_html=True)
 
 df = st.session_state.sheet_df
 if df is None:
-    st.markdown('<div class="info-strip">請先完成步驟 2 讀取資料。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-strip">請先完成步驟 3 讀取資料。</div>', unsafe_allow_html=True)
 else:
     total_rows = len(df)
     st.caption(f"資料總列數（不含標題）：**{total_rows}**")
@@ -656,101 +654,98 @@ else:
 st.markdown("<hr>", unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 ── 表單欄位檢查（折疊，進階用）
-# ─────────────────────────────────────────────────────────────────────────────
 with st.expander("🔍 進階：表單欄位對照（除錯用）", expanded=False):
     form_info = st.session_state.form_info
     if not form_info:
         st.info("請先登入後台")
     else:
-        st.markdown('<div class="step-pill"><span class="step-num">4</span>表單欄位</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**後台表單欄位**")
-            st.json(form_info["field_names"], expanded=False)
-        with c2:
-            st.markdown("**欄位 Mapping**")
-            st.json(FORM_FIELD_MAP, expanded=False)
+        st.markdown("**後台表單欄位**")
+        st.json(form_info["field_names"], expanded=False)
+        st.markdown("**欄位 Mapping**")
+        st.json(FORM_FIELD_MAP, expanded=False)
+        st.markdown("**目前地區 extra_payload**")
+        st.json(area_conf.get("extra_payload", {}), expanded=False)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 ── 匯入
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
 
-st.markdown("<br>", unsafe_allow_html=True)
-
+convert_birthday_to_ad = st.checkbox("生日送出改西元格式（如後台不接受民國再勾）", value=False)
 import_clicked = st.button("🚀 開始匯入", type="primary", use_container_width=False)
 
 if import_clicked:
-    df          = st.session_state.sheet_df
-    session     = st.session_state.session
-    form_info   = st.session_state.form_info
+    df = st.session_state.sheet_df
+    session = st.session_state.session
+    form_info = st.session_state.form_info
 
-    # Guard checks
     if df is None:
-        st.error("請先讀取 Google Sheet（步驟 2）")
+        st.error("請先讀取 Google Sheet（步驟 3）")
     elif session is None or form_info is None:
-        st.error("請先登入後台（步驟 1）")
+        st.error("請先登入後台（步驟 2）")
     else:
         missing = validate_sheet_columns(df)
         if missing:
             st.error("Google Sheet 缺少欄位：" + "、".join(missing))
         else:
             start_row = int(st.session_state.start_row)
-            end_row   = int(st.session_state.end_row)
+            end_row = int(st.session_state.end_row)
+
             if end_row < start_row:
                 st.error("結束列不可小於起始列")
             else:
                 selected_df = df.iloc[start_row - 2:end_row - 1].copy()
-                results     = []
-                total       = max(len(selected_df), 1)
+                results = []
+                total = max(len(selected_df), 1)
 
-                progress_bar  = st.progress(0)
-                status_text   = st.empty()
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
                 for idx, (_, row) in enumerate(selected_df.iterrows(), start=1):
                     sheet_row_no = start_row + idx - 1
                     row_dict = normalize_row(row.to_dict())
-                    payload  = build_payload(row_dict, form_info["_token"], convert_birthday_to_ad=False)
+                    payload = build_payload(
+                        row_dict,
+                        form_info["_token"],
+                        convert_birthday_to_ad=convert_birthday_to_ad,
+                        area_extra_payload=area_conf.get("extra_payload", {}),
+                    )
 
                     with st.expander(f"第 {sheet_row_no} 列 payload", expanded=False):
                         st.json(payload)
 
                     try:
-                        resp    = submit_user(session, form_info["submit_url"], payload)
+                        resp = submit_user(session, form_info["submit_url"], payload)
                         success = is_success_response(resp)
                         message = "成功" if success else f"失敗 HTTP {resp.status_code} / {extract_error_message(resp)}"
                     except Exception as e:
-                        success, message = False, str(e)
+                        success = False
+                        message = str(e)
 
                     results.append({
-                        "Sheet列號":  sheet_row_no,
+                        "地區": area_name,
+                        "Sheet列號": sheet_row_no,
                         "使用者名稱": row_dict.get("使用者名稱", ""),
-                        "email":      row_dict.get("email", ""),
+                        "email": row_dict.get("email", ""),
                         "生日(民國)": row_dict.get("生日", ""),
-                        "電話":       row_dict.get("電話", ""),
-                        "到職日期":   row_dict.get("到職日期", ""),
-                        "結果":       "✅ 成功" if success else "❌ 失敗",
-                        "訊息":       message,
+                        "電話": row_dict.get("電話", ""),
+                        "到職日期": row_dict.get("到職日期", ""),
+                        "結果": "✅ 成功" if success else "❌ 失敗",
+                        "訊息": message,
                     })
 
                     name = row_dict.get("使用者名稱", "")
                     status_text.markdown(
-                        f'<span class="badge-warn">處理中：第 {sheet_row_no} 列 &nbsp;｜&nbsp; {name}</span>',
+                        f'<span class="badge-warn">處理中：{area_name}｜第 {sheet_row_no} 列｜{name}</span>',
                         unsafe_allow_html=True,
                     )
                     progress_bar.progress(idx / total)
 
                 status_text.empty()
                 result_df = pd.DataFrame(results)
-                ok_count  = (result_df["結果"] == "✅ 成功").sum()
+                ok_count = (result_df["結果"] == "✅ 成功").sum()
                 err_count = (result_df["結果"] == "❌ 失敗").sum()
 
-                # Summary stats
                 st.markdown(f"""
                 <div class="stat-row">
                   <div class="stat-box stat-tot">
@@ -775,6 +770,6 @@ if import_clicked:
                 st.download_button(
                     "📄 下載結果 CSV",
                     data=csv_bytes,
-                    file_name="import_result.csv",
+                    file_name=f"import_result_{area_name}.csv",
                     mime="text/csv",
                 )
