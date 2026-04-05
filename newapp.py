@@ -332,14 +332,15 @@ html, body, [class*="css"] {
 
 /* ── Hero header ── */
 .hero {
-    background: linear-gradient(135deg, var(--lemon) 0%, #FFE066 60%, #FFFBEA 100%);
+    background: linear-gradient(135deg, #FFFDF0 0%, #FFFBEA 100%);
+    border: 1.5px solid var(--lemon-mid);
     border-radius: var(--radius);
     padding: 2rem 2.5rem 1.6rem;
     margin-bottom: 2rem;
     display: flex;
     align-items: center;
     gap: 1.2rem;
-    box-shadow: 0 4px 24px rgba(245,197,24,0.25);
+    box-shadow: 0 2px 12px rgba(245,197,24,0.10);
 }
 .hero-emoji { font-size: 3rem; line-height: 1; }
 .hero-title {
@@ -680,12 +681,6 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
 
-opt_col1, opt_col2 = st.columns(2)
-with opt_col1:
-    dry_run = st.checkbox("🧪 測試模式（不真的送出）", value=False)
-with opt_col2:
-    convert_birthday_to_ad = st.checkbox("📅 生日轉西元格式", value=False)
-
 st.markdown("<br>", unsafe_allow_html=True)
 
 import_clicked = st.button("🚀 開始匯入", type="primary", use_container_width=False)
@@ -720,20 +715,17 @@ if import_clicked:
                 for idx, (_, row) in enumerate(selected_df.iterrows(), start=1):
                     sheet_row_no = start_row + idx - 1
                     row_dict = normalize_row(row.to_dict())
-                    payload  = build_payload(row_dict, form_info["_token"], convert_birthday_to_ad)
+                    payload  = build_payload(row_dict, form_info["_token"], convert_birthday_to_ad=False)
 
                     with st.expander(f"第 {sheet_row_no} 列 payload", expanded=False):
                         st.json(payload)
 
-                    if dry_run:
-                        success, message = True, "測試模式，未送出"
-                    else:
-                        try:
-                            resp    = submit_user(session, form_info["submit_url"], payload)
-                            success = is_success_response(resp)
-                            message = "成功" if success else f"失敗 HTTP {resp.status_code} / {extract_error_message(resp)}"
-                        except Exception as e:
-                            success, message = False, str(e)
+                    try:
+                        resp    = submit_user(session, form_info["submit_url"], payload)
+                        success = is_success_response(resp)
+                        message = "成功" if success else f"失敗 HTTP {resp.status_code} / {extract_error_message(resp)}"
+                    except Exception as e:
+                        success, message = False, str(e)
 
                     results.append({
                         "Sheet列號":  sheet_row_no,
