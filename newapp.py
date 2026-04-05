@@ -518,7 +518,7 @@ st.markdown("""
 <div class="hero">
   <div class="hero-emoji">🍋</div>
   <div>
-    <div class="hero-title">新人使用者匯入工具</div>
+    <div class="hero-title">新人系統建檔工具</div>
     <div class="hero-sub">登入後台 &nbsp;→&nbsp; 讀取 Google Sheet &nbsp;→&nbsp; 選擇起訖列 &nbsp;→&nbsp; 批次匯入</div>
   </div>
 </div>
