@@ -263,7 +263,7 @@ def build_payload(
     for zh_name, field_name in FORM_FIELD_MAP.items():
         value = merged.get(zh_name, "").strip()
 
-        if zh_name == "生日":
+        if zh_name in ["生日", "到職日期"]:
             if convert_birthday_to_ad:
                 value = convert_roc_to_ad_if_needed(value)
             payload[field_name] = value
@@ -520,6 +520,11 @@ for key in ["session", "logged_in_email", "sheet_df", "form_info"]:
 if "area_name" not in st.session_state:
     st.session_state.area_name = list(AREA_CONFIG.keys())[0]
 
+if "start_row" not in st.session_state:
+    st.session_state.start_row = 2
+
+if "end_row" not in st.session_state:
+    st.session_state.end_row = 5
 
 st.markdown('<div class="step-pill"><span class="step-num">1</span>選擇地區</div>', unsafe_allow_html=True)
 
@@ -533,7 +538,6 @@ st.markdown(
 )
 
 st.markdown("<hr>", unsafe_allow_html=True)
-
 
 st.markdown('<div class="step-pill"><span class="step-num">2</span>後台登入</div>', unsafe_allow_html=True)
 
@@ -583,7 +587,6 @@ else:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-
 st.markdown('<div class="step-pill"><span class="step-num">3</span>讀取 Google Sheet</div>', unsafe_allow_html=True)
 
 st.markdown(
@@ -603,6 +606,15 @@ if fetch_clicked:
         try:
             df = fetch_sheet(area_conf["sheet_id"], area_conf["sheet_name"])
             st.session_state.sheet_df = df
+
+            total_rows = len(df)
+            if total_rows > 0:
+                st.session_state.start_row = 2
+                st.session_state.end_row = min(total_rows + 1, 5)
+            else:
+                st.session_state.start_row = 2
+                st.session_state.end_row = 2
+
             sheet_status.markdown(
                 f'<span class="badge-ok">✓ 已讀取 {len(df)} 筆資料</span>',
                 unsafe_allow_html=True,
@@ -622,11 +634,7 @@ if df is not None:
         st.markdown('<span class="badge-ok">✓ 欄位檢查通過</span>', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
-    with st.expander("預覽前 10 筆", expanded=False):
-        st.dataframe(df.head(10), use_container_width=True)
-
 st.markdown("<hr>", unsafe_allow_html=True)
-
 
 st.markdown('<div class="step-pill"><span class="step-num">4</span>選擇起訖列與預覽</div>', unsafe_allow_html=True)
 
@@ -639,9 +647,21 @@ else:
 
     c1, c2 = st.columns(2)
     with c1:
-        start_row = st.number_input("起始列（Google Sheet 列號）", min_value=2, value=2, step=1, key="start_row")
+        start_row = st.number_input(
+            "起始列（Google Sheet 列號）",
+            min_value=2,
+            value=int(st.session_state.start_row),
+            step=1,
+            key="start_row",
+        )
     with c2:
-        end_row = st.number_input("結束列（Google Sheet 列號）", min_value=2, value=min(5, total_rows + 1), step=1, key="end_row")
+        end_row = st.number_input(
+            "結束列（Google Sheet 列號）",
+            min_value=2,
+            value=int(st.session_state.end_row),
+            step=1,
+            key="end_row",
+        )
 
     if end_row < start_row:
         st.error("結束列不可小於起始列")
@@ -652,7 +672,6 @@ else:
         st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
 
 st.markdown("<hr>", unsafe_allow_html=True)
-
 
 with st.expander("🔍 進階：表單欄位對照（除錯用）", expanded=False):
     form_info = st.session_state.form_info
@@ -668,8 +687,12 @@ with st.expander("🔍 進階：表單欄位對照（除錯用）", expanded=Fal
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
+
+convert_birthday_to_ad = st.checkbox(
+    "生日／到職日期若為民國格式，自動轉為西元格式",
+    value=True,
+)
 
 import_clicked = st.button("🚀 開始匯入", type="primary", use_container_width=False)
 
