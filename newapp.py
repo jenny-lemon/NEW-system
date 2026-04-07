@@ -791,20 +791,12 @@ with col_opt2:
         value=False,
     )
 
-col_opt3, col_opt4 = st.columns(2)
-with col_opt3:
-    overwrite_existing_u = st.checkbox(
-        "若 U 欄已有值，仍覆蓋",
-        value=False,
-    )
-with col_opt4:
-    skip_if_u_has_value = st.checkbox(
-        "若 U 欄已有值，略過該列不匯入",
-        value=True,
-    )
+skip_if_u_has_value = True
 
-if overwrite_existing_u and skip_if_u_has_value:
-    st.warning("你同時勾選了「覆蓋」與「略過」。實際執行時會以「略過該列不匯入」為優先。")
+st.markdown(
+    '<div class="info-strip">📝 預設規則：U 欄寫入日期＋時間；若 U 欄已有值，將自動略過該列不匯入。</div>',
+    unsafe_allow_html=True,
+)
 
 import_clicked = st.button("🚀 開始匯入", type="primary", use_container_width=False)
 
