@@ -1,6 +1,7 @@
 import re
 from io import StringIO
-from typing import Dict, List
+from typing import Dict, List, Tuple
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -22,6 +23,11 @@ except Exception:
             "extra_payload": {},
         }
     }
+
+try:
+    import gspread
+except Exception:
+    gspread = None
 
 BASE_URL = "https://backend.lemonclean.com.tw"
 LOGIN_URL = f"{BASE_URL}/login"
@@ -159,7 +165,7 @@ def fetch_sheet(sheet_id: str, sheet_name: str) -> pd.DataFrame:
     url = build_sheet_csv_url(sheet_id, sheet_name)
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
-    return pd.read_csv(StringIO(resp.text))
+    return pd.read_csv(StringIO(resp.text), dtype=str, keep_default_na=False)
 
 
 def get_login_token(session: requests.Session) -> str:
@@ -220,6 +226,25 @@ def validate_sheet_columns(df: pd.DataFrame) -> List[str]:
     return [c for c in REQUIRED_SHEET_COLUMNS if c not in df.columns]
 
 
+def fix_phone(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    if "e" in text.lower():
+        try:
+            text = str(int(float(text)))
+        except Exception:
+            pass
+
+    digits = re.sub(r"\D", "", text)
+
+    if len(digits) == 9 and digits.startswith("9"):
+        digits = "0" + digits
+
+    return digits if digits else text
+
+
 def normalize_row(row: Dict) -> Dict[str, str]:
     normalized = {}
     for target_key, source_col in SOURCE_COLUMN_MAP.items():
@@ -227,7 +252,10 @@ def normalize_row(row: Dict) -> Dict[str, str]:
         if pd.isna(value):
             normalized[target_key] = ""
         else:
-            normalized[target_key] = str(value).strip()
+            text = str(value).strip()
+            if target_key in ["電話", "緊急連絡人電話"]:
+                text = fix_phone(text)
+            normalized[target_key] = text
     return normalized
 
 
@@ -281,6 +309,7 @@ def build_payload(
     raw_items = [x.strip() for x in re.split(r"[、,，/]+", service_value) if x.strip()]
     if not raw_items and service_value:
         raw_items = [service_value]
+
     for item in raw_items:
         mapped = COORDINATOR_ITEM_MAP.get(item)
         if mapped:
@@ -336,6 +365,75 @@ def is_success_response(resp: requests.Response) -> bool:
         return False
 
     return False
+
+
+def parse_sheet_row_input(text: str, max_data_rows: int) -> List[int]:
+    """
+    支援：
+    3,5
+    3-5,8,10-12
+    回傳 Google Sheet 真實列號（含表頭概念，資料列從第2列開始）
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+
+    result = set()
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+
+    for part in parts:
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start_n = int(start_s.strip())
+            end_n = int(end_s.strip())
+            if end_n < start_n:
+                start_n, end_n = end_n, start_n
+
+            for n in range(start_n, end_n + 1):
+                if 2 <= n <= max_data_rows + 1:
+                    result.add(n)
+        else:
+            n = int(part)
+            if 2 <= n <= max_data_rows + 1:
+                result.add(n)
+
+    return sorted(result)
+
+
+def get_gspread_worksheet(sheet_id: str, sheet_name: str):
+    if gspread is None:
+        raise RuntimeError("尚未安裝 gspread，請先 pip install gspread google-auth")
+
+    try:
+        gc = gspread.service_account(filename="service_account.json")
+    except Exception as e:
+        raise RuntimeError(
+            f"無法載入 service_account.json：{e}。"
+            f"請確認檔案存在於 app 同層目錄，且該帳號已被加入 Google Sheet 共用名單。"
+        )
+
+    sh = gc.open_by_key(sheet_id)
+    return sh.worksheet(sheet_name)
+
+
+def read_u_column_value(sheet_id: str, sheet_name: str, row_no: int) -> str:
+    ws = get_gspread_worksheet(sheet_id, sheet_name)
+    return str(ws.acell(f"U{row_no}").value or "").strip()
+
+
+def write_import_date_to_u_column(
+    sheet_id: str,
+    sheet_name: str,
+    row_no: int,
+    value: str,
+) -> None:
+    ws = get_gspread_worksheet(sheet_id, sheet_name)
+    ws.update_acell(f"U{row_no}", value)
+
+
+def build_import_mark(include_time: bool) -> str:
+    now = datetime.now()
+    return now.strftime("%Y-%m-%d %H:%M:%S") if include_time else now.strftime("%Y-%m-%d")
 
 
 st.set_page_config(page_title="新人匯入工具", page_icon="🍋", layout="wide")
@@ -507,7 +605,7 @@ st.markdown("""
   <div class="hero-emoji">🍋</div>
   <div>
     <div class="hero-title">新人系統建檔工具</div>
-    <div class="hero-sub">登入後台 → 選擇地區 → 讀取 Google Sheet → 選擇起訖列 → 批次匯入</div>
+    <div class="hero-sub">登入後台 → 選擇地區 → 讀取 Google Sheet → 選擇列號 → 批次匯入 → 成功後回寫 U 欄匯入日</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -520,11 +618,11 @@ for key in ["session", "logged_in_email", "sheet_df", "form_info"]:
 if "area_name" not in st.session_state:
     st.session_state.area_name = list(AREA_CONFIG.keys())[0]
 
-if "start_row" not in st.session_state:
-    st.session_state.start_row = 2
+if "selected_rows_text" not in st.session_state:
+    st.session_state.selected_rows_text = "3,5"
 
-if "end_row" not in st.session_state:
-    st.session_state.end_row = 5
+if "selected_sheet_rows" not in st.session_state:
+    st.session_state.selected_sheet_rows = []
 
 st.markdown('<div class="step-pill"><span class="step-num">1</span>選擇地區</div>', unsafe_allow_html=True)
 
@@ -582,7 +680,8 @@ if st.session_state.session:
     )
 else:
     login_status_placeholder.markdown(
-        '<span class="badge-warn">尚未登入</span>', unsafe_allow_html=True
+        '<span class="badge-warn">尚未登入</span>',
+        unsafe_allow_html=True,
     )
 
 st.markdown("<hr>", unsafe_allow_html=True)
@@ -606,15 +705,6 @@ if fetch_clicked:
         try:
             df = fetch_sheet(area_conf["sheet_id"], area_conf["sheet_name"])
             st.session_state.sheet_df = df
-
-            total_rows = len(df)
-            if total_rows > 0:
-                st.session_state.start_row = 2
-                st.session_state.end_row = min(total_rows + 1, 5)
-            else:
-                st.session_state.start_row = 2
-                st.session_state.end_row = 2
-
             sheet_status.markdown(
                 f'<span class="badge-ok">✓ 已讀取 {len(df)} 筆資料</span>',
                 unsafe_allow_html=True,
@@ -636,7 +726,7 @@ if df is not None:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-st.markdown('<div class="step-pill"><span class="step-num">4</span>選擇起訖列與預覽</div>', unsafe_allow_html=True)
+st.markdown('<div class="step-pill"><span class="step-num">4</span>選擇列號與預覽</div>', unsafe_allow_html=True)
 
 df = st.session_state.sheet_df
 if df is None:
@@ -645,31 +735,31 @@ else:
     total_rows = len(df)
     st.caption(f"資料總列數（不含標題）：**{total_rows}**")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        start_row = st.number_input(
-            "起始列（Google Sheet 列號）",
-            min_value=2,
-            value=int(st.session_state.start_row),
-            step=1,
-            key="start_row",
-        )
-    with c2:
-        end_row = st.number_input(
-            "結束列（Google Sheet 列號）",
-            min_value=2,
-            value=int(st.session_state.end_row),
-            step=1,
-            key="end_row",
-        )
+    selected_rows_text = st.text_input(
+        "請輸入要匯入的 Google Sheet 列號",
+        key="selected_rows_text",
+        help="可輸入：3,5 或 3-5,8,10-12",
+        placeholder="例如：3,5,8-10",
+    )
 
-    if end_row < start_row:
-        st.error("結束列不可小於起始列")
+    try:
+        selected_sheet_rows = parse_sheet_row_input(selected_rows_text, total_rows)
+        st.session_state.selected_sheet_rows = selected_sheet_rows
+    except Exception:
+        selected_sheet_rows = []
+        st.session_state.selected_sheet_rows = []
+        st.error("列號格式錯誤，請輸入如：3,5 或 3-5,8")
+
+    if not selected_sheet_rows:
+        st.warning("目前沒有可匯入的列")
     else:
-        selected_df = df.iloc[int(start_row) - 2:int(end_row) - 1].copy()
+        row_indexes = [row_no - 2 for row_no in selected_sheet_rows]
+        selected_df = df.iloc[row_indexes].copy()
         preview_rows = [normalize_row(r.to_dict()) for _, r in selected_df.iterrows()]
-        st.caption(f"已選取 **{len(preview_rows)}** 筆")
-        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+        preview_df = pd.DataFrame(preview_rows)
+        preview_df.insert(0, "Sheet列號", selected_sheet_rows)
+        st.caption(f"已選取 **{len(preview_rows)}** 筆：{selected_sheet_rows}")
+        st.dataframe(preview_df, use_container_width=True)
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -689,10 +779,32 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
 
-convert_birthday_to_ad = st.checkbox(
-    "生日／到職日期若為民國格式，自動轉為西元格式",
-    value=True,
-)
+col_opt1, col_opt2 = st.columns(2)
+with col_opt1:
+    convert_birthday_to_ad = st.checkbox(
+        "生日／到職日期若為民國格式，自動轉為西元格式",
+        value=True,
+    )
+with col_opt2:
+    include_time_in_u = st.checkbox(
+        "U 欄寫入日期＋時間",
+        value=False,
+    )
+
+col_opt3, col_opt4 = st.columns(2)
+with col_opt3:
+    overwrite_existing_u = st.checkbox(
+        "若 U 欄已有值，仍覆蓋",
+        value=False,
+    )
+with col_opt4:
+    skip_if_u_has_value = st.checkbox(
+        "若 U 欄已有值，略過該列不匯入",
+        value=True,
+    )
+
+if overwrite_existing_u and skip_if_u_has_value:
+    st.warning("你同時勾選了「覆蓋」與「略過」。實際執行時會以「略過該列不匯入」為優先。")
 
 import_clicked = st.button("🚀 開始匯入", type="primary", use_container_width=False)
 
@@ -700,98 +812,159 @@ if import_clicked:
     df = st.session_state.sheet_df
     session = st.session_state.session
     form_info = st.session_state.form_info
+    selected_sheet_rows = st.session_state.get("selected_sheet_rows", [])
 
     if df is None:
         st.error("請先讀取 Google Sheet（步驟 3）")
     elif session is None or form_info is None:
         st.error("請先登入後台（步驟 2）")
+    elif not selected_sheet_rows:
+        st.error("請先輸入要匯入的列號（步驟 4）")
     else:
         missing = validate_sheet_columns(df)
         if missing:
             st.error("Google Sheet 缺少欄位：" + "、".join(missing))
         else:
-            start_row = int(st.session_state.start_row)
-            end_row = int(st.session_state.end_row)
+            results = []
+            total = max(len(selected_sheet_rows), 1)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            if end_row < start_row:
-                st.error("結束列不可小於起始列")
-            else:
-                selected_df = df.iloc[start_row - 2:end_row - 1].copy()
-                results = []
-                total = max(len(selected_df), 1)
+            for idx, sheet_row_no in enumerate(selected_sheet_rows, start=1):
+                row = df.iloc[sheet_row_no - 2]
+                row_dict = normalize_row(row.to_dict())
 
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+                u_before = ""
+                skip_reason = ""
 
-                for idx, (_, row) in enumerate(selected_df.iterrows(), start=1):
-                    sheet_row_no = start_row + idx - 1
-                    row_dict = normalize_row(row.to_dict())
-                    payload = build_payload(
-                        row_dict,
-                        form_info["_token"],
-                        convert_birthday_to_ad=convert_birthday_to_ad,
-                        area_extra_payload=area_conf.get("extra_payload", {}),
+                try:
+                    u_before = read_u_column_value(
+                        area_conf["sheet_id"],
+                        area_conf["sheet_name"],
+                        sheet_row_no,
                     )
+                    if u_before and skip_if_u_has_value:
+                        skip_reason = f"U欄已有值：{u_before}"
+                except Exception as e:
+                    u_before = ""
+                    skip_reason = ""
+                    u_read_error = str(e)
+                else:
+                    u_read_error = ""
 
-                    with st.expander(f"第 {sheet_row_no} 列 payload", expanded=False):
-                        st.json(payload)
-
-                    try:
-                        resp = submit_user(session, form_info["submit_url"], payload)
-                        success = is_success_response(resp)
-                        message = "成功" if success else f"失敗 HTTP {resp.status_code} / {extract_error_message(resp)}"
-                    except Exception as e:
-                        success = False
-                        message = str(e)
-
+                if skip_reason:
                     results.append({
                         "地區": area_name,
                         "Sheet列號": sheet_row_no,
                         "使用者名稱": row_dict.get("使用者名稱", ""),
                         "email": row_dict.get("email", ""),
-                        "生日(民國)": row_dict.get("生日", ""),
                         "電話": row_dict.get("電話", ""),
+                        "緊急連絡人電話": row_dict.get("緊急連絡人電話", ""),
                         "到職日期": row_dict.get("到職日期", ""),
-                        "結果": "✅ 成功" if success else "❌ 失敗",
-                        "訊息": message,
+                        "U欄原值": u_before,
+                        "U欄寫入": "",
+                        "結果": "⏭️ 略過",
+                        "訊息": skip_reason,
                     })
-
-                    name = row_dict.get("使用者名稱", "")
-                    status_text.markdown(
-                        f'<span class="badge-warn">處理中：{area_name}｜第 {sheet_row_no} 列｜{name}</span>',
-                        unsafe_allow_html=True,
-                    )
                     progress_bar.progress(idx / total)
+                    continue
 
-                status_text.empty()
-                result_df = pd.DataFrame(results)
-                ok_count = (result_df["結果"] == "✅ 成功").sum()
-                err_count = (result_df["結果"] == "❌ 失敗").sum()
-
-                st.markdown(f"""
-                <div class="stat-row">
-                  <div class="stat-box stat-tot">
-                    <div class="stat-num">{len(results)}</div>
-                    <div class="stat-lbl">處理總筆數</div>
-                  </div>
-                  <div class="stat-box stat-ok">
-                    <div class="stat-num">{ok_count}</div>
-                    <div class="stat-lbl">成功</div>
-                  </div>
-                  <div class="stat-box stat-err">
-                    <div class="stat-num">{err_count}</div>
-                    <div class="stat-lbl">失敗</div>
-                  </div>
-                </div>
-                <br>
-                """, unsafe_allow_html=True)
-
-                st.dataframe(result_df, use_container_width=True)
-
-                csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "📄 下載結果 CSV",
-                    data=csv_bytes,
-                    file_name=f"import_result_{area_name}.csv",
-                    mime="text/csv",
+                payload = build_payload(
+                    row_dict,
+                    form_info["_token"],
+                    convert_birthday_to_ad=convert_birthday_to_ad,
+                    area_extra_payload=area_conf.get("extra_payload", {}),
                 )
+
+                with st.expander(f"第 {sheet_row_no} 列 payload", expanded=False):
+                    st.json(payload)
+
+                try:
+                    resp = submit_user(session, form_info["submit_url"], payload)
+                    success = is_success_response(resp)
+                    message = "成功" if success else f"失敗 HTTP {resp.status_code} / {extract_error_message(resp)}"
+                except Exception as e:
+                    success = False
+                    message = str(e)
+
+                u_written = ""
+                if success:
+                    mark_value = build_import_mark(include_time_in_u)
+
+                    try:
+                        if u_before and not overwrite_existing_u and not skip_if_u_has_value:
+                            u_written = u_before
+                            message = f"{message} / U欄已有值，未覆蓋：{u_before}"
+                        else:
+                            write_import_date_to_u_column(
+                                area_conf["sheet_id"],
+                                area_conf["sheet_name"],
+                                sheet_row_no,
+                                mark_value,
+                            )
+                            u_written = mark_value
+                    except Exception as e:
+                        if u_read_error:
+                            message = f"{message} / U欄讀取失敗：{u_read_error} / U欄寫入失敗：{e}"
+                        else:
+                            message = f"{message} / U欄寫入失敗：{e}"
+
+                results.append({
+                    "地區": area_name,
+                    "Sheet列號": sheet_row_no,
+                    "使用者名稱": row_dict.get("使用者名稱", ""),
+                    "email": row_dict.get("email", ""),
+                    "電話": row_dict.get("電話", ""),
+                    "緊急連絡人電話": row_dict.get("緊急連絡人電話", ""),
+                    "到職日期": row_dict.get("到職日期", ""),
+                    "U欄原值": u_before,
+                    "U欄寫入": u_written,
+                    "結果": "✅ 成功" if success else "❌ 失敗",
+                    "訊息": message,
+                })
+
+                name = row_dict.get("使用者名稱", "")
+                status_text.markdown(
+                    f'<span class="badge-warn">處理中：{area_name}｜第 {sheet_row_no} 列｜{name}</span>',
+                    unsafe_allow_html=True,
+                )
+                progress_bar.progress(idx / total)
+
+            status_text.empty()
+            result_df = pd.DataFrame(results)
+
+            ok_count = (result_df["結果"] == "✅ 成功").sum()
+            err_count = (result_df["結果"] == "❌ 失敗").sum()
+            skip_count = (result_df["結果"] == "⏭️ 略過").sum()
+
+            st.markdown(f"""
+            <div class="stat-row">
+              <div class="stat-box stat-tot">
+                <div class="stat-num">{len(results)}</div>
+                <div class="stat-lbl">處理總筆數</div>
+              </div>
+              <div class="stat-box stat-ok">
+                <div class="stat-num">{ok_count}</div>
+                <div class="stat-lbl">成功</div>
+              </div>
+              <div class="stat-box stat-err">
+                <div class="stat-num">{err_count}</div>
+                <div class="stat-lbl">失敗</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-num">{skip_count}</div>
+                <div class="stat-lbl">略過</div>
+              </div>
+            </div>
+            <br>
+            """, unsafe_allow_html=True)
+
+            st.dataframe(result_df, use_container_width=True)
+
+            csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📄 下載結果 CSV",
+                data=csv_bytes,
+                file_name=f"import_result_{area_name}.csv",
+                mime="text/csv",
+            )
