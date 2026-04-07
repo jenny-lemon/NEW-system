@@ -1,6 +1,6 @@
 import re
 from io import StringIO
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from datetime import datetime
 
 import pandas as pd
@@ -368,12 +368,6 @@ def is_success_response(resp: requests.Response) -> bool:
 
 
 def parse_sheet_row_input(text: str, max_data_rows: int) -> List[int]:
-    """
-    支援：
-    3,5
-    3-5,8,10-12
-    回傳 Google Sheet 真實列號（含表頭概念，資料列從第2列開始）
-    """
     raw = str(text or "").strip()
     if not raw:
         return []
@@ -431,9 +425,8 @@ def write_import_date_to_u_column(
     ws.update_acell(f"U{row_no}", value)
 
 
-def build_import_mark(include_time: bool) -> str:
-    now = datetime.now()
-    return now.strftime("%Y-%m-%d %H:%M:%S") if include_time else now.strftime("%Y-%m-%d")
+def build_import_mark() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 st.set_page_config(page_title="新人匯入工具", page_icon="🍋", layout="wide")
@@ -779,19 +772,10 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
 
-col_opt1, col_opt2 = st.columns(2)
-with col_opt1:
-    convert_birthday_to_ad = st.checkbox(
-        "生日／到職日期若為民國格式，自動轉為西元格式",
-        value=True,
-    )
-with col_opt2:
-    include_time_in_u = st.checkbox(
-        "U 欄寫入日期＋時間",
-        value=False,
-    )
-
-skip_if_u_has_value = True
+convert_birthday_to_ad = st.checkbox(
+    "生日 / 到職日期若為民國格式，自動轉為西元格式",
+    value=True,
+)
 
 st.markdown(
     '<div class="info-strip">📝 預設規則：U 欄寫入日期＋時間；若 U 欄已有值，將自動略過該列不匯入。</div>',
@@ -828,6 +812,7 @@ if import_clicked:
 
                 u_before = ""
                 skip_reason = ""
+                u_read_error = ""
 
                 try:
                     u_before = read_u_column_value(
@@ -835,14 +820,10 @@ if import_clicked:
                         area_conf["sheet_name"],
                         sheet_row_no,
                     )
-                    if u_before and skip_if_u_has_value:
+                    if u_before:
                         skip_reason = f"U欄已有值：{u_before}"
                 except Exception as e:
-                    u_before = ""
-                    skip_reason = ""
                     u_read_error = str(e)
-                else:
-                    u_read_error = ""
 
                 if skip_reason:
                     results.append({
@@ -881,20 +862,16 @@ if import_clicked:
 
                 u_written = ""
                 if success:
-                    mark_value = build_import_mark(include_time_in_u)
+                    mark_value = build_import_mark()
 
                     try:
-                        if u_before and not overwrite_existing_u and not skip_if_u_has_value:
-                            u_written = u_before
-                            message = f"{message} / U欄已有值，未覆蓋：{u_before}"
-                        else:
-                            write_import_date_to_u_column(
-                                area_conf["sheet_id"],
-                                area_conf["sheet_name"],
-                                sheet_row_no,
-                                mark_value,
-                            )
-                            u_written = mark_value
+                        write_import_date_to_u_column(
+                            area_conf["sheet_id"],
+                            area_conf["sheet_name"],
+                            sheet_row_no,
+                            mark_value,
+                        )
+                        u_written = mark_value
                     except Exception as e:
                         if u_read_error:
                             message = f"{message} / U欄讀取失敗：{u_read_error} / U欄寫入失敗：{e}"
