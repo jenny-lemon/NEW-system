@@ -772,11 +772,6 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 st.markdown('<div class="step-pill"><span class="step-num">5</span>開始匯入</div>', unsafe_allow_html=True)
 
-convert_birthday_to_ad = st.checkbox(
-    "生日 / 到職日期若為民國格式，自動轉為西元格式",
-    value=True,
-)
-
 st.markdown(
     '<div class="info-strip">📝 預設規則：U 欄寫入日期＋時間；若 U 欄已有值，將自動略過該列不匯入。</div>',
     unsafe_allow_html=True,
